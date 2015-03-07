@@ -1,10 +1,10 @@
-from threading import Thread, Lock
 from time import sleep
 
 import os
 import subprocess
-
+import threading
 import neovim
+from twisted.internet import reactor, protocol
 
 def which(program):
   def is_exe(fpath):
@@ -36,7 +36,70 @@ class SbtProject(ScalaProject):
   def __init__(self, vim, path):
     super(SbtProject, self).__init__(vim)
 
-    self.base = path
+    # check if sbt is installed
+    self.sbt_path = which("sbt")
+    if not self.sbt_path:
+      self.vim.error("SBT executable not found")
+
+    self.project = path
+    self.sbt = Sbt(self.sbt_path, self.project)
+
+  def compile(self):
+    print("???")
+
+    # self.sbt.communicate("compile")
+
+class Sbt(object):
+
+  class SbtProtocol(protocol.ProcessProtocol):
+
+    def connectionMade(self):
+      print("Connection made!")
+
+    def outReceived(self, data):
+      print("out >> %s" % data)
+
+    def errReceived(self, data):
+      print("err >> %s" % data)
+
+    def inConnectionLost(self):
+      print "inConnectionLost! stdin is closed! (we probably did it)"
+
+    def outConnectionLost(self):
+      print "outConnectionLost! The child closed their stdout!"
+
+    def errConnectionLost(self):
+      print "errConnectionLost! The child closed their stderr."
+
+    def processExited(self, reason):
+      print "processExited, status %d" % (reason.value.exitCode,)
+
+    def processEnded(self, reason):
+      print "processEnded, status %d" % (reason.value.exitCode,)
+      print "quitting"
+      reactor.stop()
+
+  def __init__(self, sbt_path, project):
+    self.sbt_path = sbt_path
+    self.project = project
+    self.errbuff = []
+    self.outbuff = []
+    self.lock = threading.Lock()
+
+    self.thread = threading.Thread(target=self.run)
+    self.thread.start()
+
+  def run(self):
+    # open sbt subprocess
+    reactor.spawnProcess(
+      Sbt.SbtProtocol(),
+      self.sbt_path,
+      [self.sbt_path],
+      { 'PATH': os.environ['PATH'] },
+      self.project,
+      usePTY=True
+    )
+    reactor.run()
 
 class VimBase(object):
 
@@ -77,10 +140,6 @@ class Scala(object):
   def keypress(self, key):
     self.vim.echo("pressed %s" % key)
 
-  def verify_sbt_installed(self):
-    if not which("sbt"):
-      self.vim.error("SBT executable not found")
-
   @neovim.command('SbtProject', sync=True, nargs=1)
   def sbt_project(self, args):
     project, = args
@@ -92,13 +151,19 @@ class Scala(object):
     # check if it's a valid directory
     if not os.path.isdir(project): self.vim.error("No such file or directory: %s" % project)
 
-    # check if sbt is installed
-    self.verify_sbt_installed()
-
     # check if we can start sbt in the background
     self.project = SbtProject(self.vim, project)
     self.vim.echo("Set scala project to %s" % project)
 
+    return self.project
+
 if __name__ == "__main__":
   scala = Scala(VimBase())
-  scala.sbt_project(["/home/arjen/repositories/fortress"])
+  project = scala.sbt_project(["/home/arjen/repositories/fortress"])
+
+  while True:
+    print("in")
+    c = raw_input("> ")
+    if c == "c":
+      print(">> Start background compilation...")
+      project.compile()

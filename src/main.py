@@ -1,6 +1,7 @@
 from time import sleep
 
 import os
+import re
 import subprocess
 import threading
 import neovim
@@ -49,50 +50,65 @@ class SbtProject(ScalaProject):
 
     # self.sbt.communicate("compile")
 
+class SbtProtocol(protocol.ProcessProtocol):
+
+  def __init__(self, sbt):
+    self.sbt = sbt
+
+    # indicates if sbt is waiting for input
+    self.lock = threading.Lock()
+
+  def acquire(self):
+    print("[INFO] SBT locking...")
+    self.lock.acquire()
+
+  def ready(self):
+    print("[INFO] SBT ready...")
+    self.lock.release()
+
+  def connectionMade(self):
+    print("Connection made!")
+
+    # sbt starting up
+    self.acquire()
+
+  def outReceived(self, data):
+    for line in data.split('\n'):
+
+      # detect sbt ready
+      if re.search(r'^\s*>\s*', line):
+        self.ready()
+
+  def errReceived(self, data):
+    print("err >> %s" % data)
+
+  def processEnded(self, reason):
+    reactor.stop()
+    self.release()
+
 class Sbt(object):
-
-  class SbtProtocol(protocol.ProcessProtocol):
-
-    def connectionMade(self):
-      print("Connection made!")
-
-    def outReceived(self, data):
-      print("out >> %s" % data)
-
-    def errReceived(self, data):
-      print("err >> %s" % data)
-
-    def inConnectionLost(self):
-      print "inConnectionLost! stdin is closed! (we probably did it)"
-
-    def outConnectionLost(self):
-      print "outConnectionLost! The child closed their stdout!"
-
-    def errConnectionLost(self):
-      print "errConnectionLost! The child closed their stderr."
-
-    def processExited(self, reason):
-      print "processExited, status %d" % (reason.value.exitCode,)
-
-    def processEnded(self, reason):
-      print "processEnded, status %d" % (reason.value.exitCode,)
-      print "quitting"
-      reactor.stop()
 
   def __init__(self, sbt_path, project):
     self.sbt_path = sbt_path
     self.project = project
-    self.errbuff = []
-    self.outbuff = []
-    self.lock = threading.Lock()
+    self.errbuff = ""
+    self.outbuff = {}
+    self.buf_lock = threading.Lock()
 
+    # start a background sbt thread
     self.thread = threading.Thread(target=self.run)
+    self.thread.daemon = True
     self.thread.start()
+
+    self.cmd_queue = []
+
+  def queue(self, sbtcmd):
+    self.cmd_queue.append(sbtcmd)
 
   def run(self):
     # open sbt subprocess
     reactor.spawnProcess(
-      Sbt.SbtProtocol(),
+      SbtProtocol(self),
       self.sbt_path,
       [self.sbt_path],
       { 'PATH': os.environ['PATH'] },
